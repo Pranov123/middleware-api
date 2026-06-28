@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from collections import defaultdict, deque
 import threading
@@ -36,58 +36,60 @@ def check_rate_limit(client_id: str) -> bool:
         return True
 
 
-def cors_headers(origin: str) -> dict:
-    headers = {
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Max-Age": "86400",
-    }
-    if origin:
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-    return headers
-
-
 @app.middleware("http")
 async def middleware_stack(request: Request, call_next):
+    # 1. Request context
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     request.state.request_id = request_id
     origin = request.headers.get("origin", "")
 
-    # CORS preflight
+    cors = {}
+    if origin:
+        cors = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+        }
+
+    # 2. CORS preflight
     if request.method == "OPTIONS":
         return JSONResponse(
             status_code=200,
             content="OK",
-            headers={"X-Request-ID": request_id, **cors_headers(origin)},
+            headers={
+                "X-Request-ID": request_id,
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "86400",
+                **cors,
+            },
         )
 
-    # Rate limiting
+    # 3. Rate limiting
     client_id = request.headers.get("x-client-id", "anonymous")
     if not check_rate_limit(client_id):
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={"Retry-After": str(WINDOW), "X-Request-ID": request_id, **cors_headers(origin)},
+            headers={"Retry-After": str(WINDOW), "X-Request-ID": request_id, **cors},
         )
 
-    # Normal request — handle in endpoint, then patch headers
+    # 4. Call endpoint
     response = await call_next(request)
+
+    # 5. Patch headers onto the response
     response.headers["X-Request-ID"] = request_id
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+    for k, v in cors.items():
+        response.headers[k] = v
+
     return response
 
 
 @app.get("/ping")
-async def ping(request: Request):
-    # Return JSONResponse directly so headers are never lost in streaming
-    return JSONResponse(
-        status_code=200,
-        content={
-            "email": EMAIL,
-            "request_id": request.state.request_id,
-        },
-        headers={"X-Request-ID": request.state.request_id},
-    )
+async def ping(request: Request, response: Response):
+    request_id = request.state.request_id
+    # Set header here too — belt AND suspenders
+    response.headers["X-Request-ID"] = request_id
+    return {
+        "email": EMAIL,
+        "request_id": request_id,
+    }
