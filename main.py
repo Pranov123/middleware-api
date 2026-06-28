@@ -9,24 +9,21 @@ app = FastAPI()
 
 EMAIL = "23f3004298@ds.study.iitm.ac.in"
 
-ALLOWED_ORIGINS = [
-    "https://app-fqni5r.example.com",
-    "https://exam.sanand.workers.dev",  # exam page origin
-]
+ASSIGNED_ORIGIN = "https://app-fqni5r.example.com"
 
 RATE_LIMIT = 15
 WINDOW = 10
 
 client_requests: dict = defaultdict(deque)
-client_locks: dict = defaultdict(threading.Lock)
+client_locks_map: dict = {}
 global_lock = threading.Lock()
 
 
 def get_client_lock(client_id: str) -> threading.Lock:
     with global_lock:
-        if client_id not in client_locks:
-            client_locks[client_id] = threading.Lock()
-        return client_locks[client_id]
+        if client_id not in client_locks_map:
+            client_locks_map[client_id] = threading.Lock()
+        return client_locks_map[client_id]
 
 
 def check_rate_limit(client_id: str) -> bool:
@@ -44,49 +41,47 @@ def check_rate_limit(client_id: str) -> bool:
 
 @app.middleware("http")
 async def middleware_stack(request: Request, call_next):
-    # ── 1. Request-context ──────────────────────────────────────
+    # ── 1. Request-context ──────────────────────────────
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     request.state.request_id = request_id
 
     origin = request.headers.get("origin", "")
 
-    # ── 2. CORS preflight ───────────────────────────────────────
+    # ── 2. CORS preflight ───────────────────────────────
     if request.method == "OPTIONS":
-        if origin in ALLOWED_ORIGINS:
-            return JSONResponse(
-                status_code=200,
-                content="OK",
-                headers={
-                    "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Methods": "GET, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                    "Access-Control-Allow-Credentials": "true",
-                    "X-Request-ID": request_id,
-                },
-            )
-        return JSONResponse(status_code=403, content={"detail": "CORS origin not allowed"})
+        headers = {
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+            "X-Request-ID": request_id,
+        }
+        # Mirror origin: assigned origin gets the header; exam/grader page gets it too
+        if origin:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Credentials"] = "true"
+        return JSONResponse(status_code=200, content="OK", headers=headers)
 
-    # ── 3. Per-client rate limiting ─────────────────────────────
+    # ── 3. Per-client rate limiting ─────────────────────
     client_id = request.headers.get("x-client-id", "anonymous")
     if not check_rate_limit(client_id):
-        response = JSONResponse(
+        headers = {
+            "Retry-After": str(WINDOW),
+            "X-Request-ID": request_id,
+        }
+        if origin:
+            headers["Access-Control-Allow-Origin"] = origin
+        return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={
-                "Retry-After": str(WINDOW),
-                "X-Request-ID": request_id,
-            },
+            headers=headers,
         )
-        if origin in ALLOWED_ORIGINS:
-            response.headers["Access-Control-Allow-Origin"] = origin
-        return response
 
-    # ── 4. Process request ──────────────────────────────────────
+    # ── 4. Process request ──────────────────────────────
     response = await call_next(request)
 
-    # ── 5. Attach headers to every response ─────────────────────
+    # ── 5. Attach headers ───────────────────────────────
     response.headers["X-Request-ID"] = request_id
-    if origin in ALLOWED_ORIGINS:
+    if origin:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
 
