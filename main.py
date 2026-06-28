@@ -38,9 +38,12 @@ def check_rate_limit(client_id: str) -> bool:
 
 @app.middleware("http")
 async def middleware_stack(request: Request, call_next):
-    # 1. Request context
-    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    # ---------------- REQUEST ID ----------------
+    inbound_id = request.headers.get("x-request-id")
+    request_id = inbound_id if inbound_id else str(uuid.uuid4())
     request.state.request_id = request_id
+
     origin = request.headers.get("origin", "")
 
     cors = {}
@@ -50,11 +53,11 @@ async def middleware_stack(request: Request, call_next):
             "Access-Control-Allow-Credentials": "true",
         }
 
-    # 2. CORS preflight
+    # ---------------- PREFLIGHT ----------------
     if request.method == "OPTIONS":
         return JSONResponse(
             status_code=200,
-            content="OK",
+            content={"ok": True},
             headers={
                 "X-Request-ID": request_id,
                 "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -64,20 +67,31 @@ async def middleware_stack(request: Request, call_next):
             },
         )
 
-    # 3. Rate limiting
+    # ---------------- RATE LIMIT ----------------
     client_id = request.headers.get("x-client-id", "anonymous")
+
     if not check_rate_limit(client_id):
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={"Retry-After": str(WINDOW), "X-Request-ID": request_id, **cors},
+            headers={
+                "Retry-After": str(WINDOW),
+                "X-Request-ID": request_id,
+                **cors,
+            },
         )
 
-    # 4. Call endpoint
+    # ---------------- CALL APP ----------------
     response = await call_next(request)
 
-    # 5. Patch headers onto the response
-    response.headers["X-Request-ID"] = request_id
+    # 🔥 CRITICAL FIX: ALWAYS SET HEADER HERE
+    @app.get("/ping")
+    async def ping(request: Request):
+        return {
+            "email": EMAIL,
+            "request_id": request.state.request_id
+        }
+
     for k, v in cors.items():
         response.headers[k] = v
 
